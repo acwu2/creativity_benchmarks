@@ -8,106 +8,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from llm_benchmarks.clients.base import (
     BaseLLMClient,
     GenerationConfig,
-    InvalidModelError,
     LLMResponse,
     Message,
     ModelInfo,
     TokenUsage,
 )
 from llm_benchmarks.config import Settings
-
-
-# Model information for common OpenAI models
-OPENAI_MODELS: dict[str, ModelInfo] = {
-    "gpt-4o": ModelInfo(
-        provider="openai",
-        model_id="gpt-4o",
-        display_name="GPT-4o",
-        context_window=128000,
-        max_output_tokens=16384,
-        input_cost_per_1k=0.005,
-        output_cost_per_1k=0.015,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gpt-4o-mini": ModelInfo(
-        provider="openai",
-        model_id="gpt-4o-mini",
-        display_name="GPT-4o Mini",
-        context_window=128000,
-        max_output_tokens=16384,
-        input_cost_per_1k=0.00015,
-        output_cost_per_1k=0.0006,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gpt-4-turbo": ModelInfo(
-        provider="openai",
-        model_id="gpt-4-turbo",
-        display_name="GPT-4 Turbo",
-        context_window=128000,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.01,
-        output_cost_per_1k=0.03,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gpt-4": ModelInfo(
-        provider="openai",
-        model_id="gpt-4",
-        display_name="GPT-4",
-        context_window=8192,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.03,
-        output_cost_per_1k=0.06,
-        supports_vision=False,
-        supports_tools=True,
-    ),
-    "gpt-3.5-turbo": ModelInfo(
-        provider="openai",
-        model_id="gpt-3.5-turbo",
-        display_name="GPT-3.5 Turbo",
-        context_window=16385,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.0005,
-        output_cost_per_1k=0.0015,
-        supports_vision=False,
-        supports_tools=True,
-    ),
-    "o1": ModelInfo(
-        provider="openai",
-        model_id="o1",
-        display_name="o1",
-        context_window=200000,
-        max_output_tokens=100000,
-        input_cost_per_1k=0.015,
-        output_cost_per_1k=0.06,
-        supports_vision=True,
-        supports_tools=False,
-    ),
-    "o1-mini": ModelInfo(
-        provider="openai",
-        model_id="o1-mini",
-        display_name="o1-mini",
-        context_window=128000,
-        max_output_tokens=65536,
-        input_cost_per_1k=0.003,
-        output_cost_per_1k=0.012,
-        supports_vision=False,
-        supports_tools=False,
-    ),
-    "gpt-5": ModelInfo(
-        provider="openai",
-        model_id="gpt-5",
-        display_name="GPT-5",
-        context_window=256000,
-        max_output_tokens=32768,
-        input_cost_per_1k=0.01,
-        output_cost_per_1k=0.03,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-}
 
 
 class OpenAIClient(BaseLLMClient):
@@ -135,10 +41,6 @@ class OpenAIClient(BaseLLMClient):
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts
         """
-        # Validate model before initialization
-        if model not in OPENAI_MODELS:
-            raise InvalidModelError(model, "openai", list(OPENAI_MODELS.keys()))
-        
         settings = Settings()
         super().__init__(
             model=model,
@@ -292,6 +194,10 @@ class OpenAIClient(BaseLLMClient):
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
+    def _generate_with_retry(self, params: dict[str, Any]) -> Any:
+        """Make the API call with retry logic."""
+        return self.client.chat.completions.create(**params)
+
     def generate(
         self,
         prompt: str,
@@ -304,7 +210,7 @@ class OpenAIClient(BaseLLMClient):
         
         start_time = time.perf_counter()
         try:
-            response = self.client.chat.completions.create(**params)
+            response = self._generate_with_retry(params)
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
         except Exception as e:
@@ -394,19 +300,46 @@ class OpenAIClient(BaseLLMClient):
                 error=str(e),
             )
     
+    def validate_model(self) -> None:
+        """Validate that the model exists.
+
+        Queries the OpenAI Models API to confirm the model is accessible.
+
+        Raises:
+            ValueError: If the API reports that the model does not exist.
+        """
+        try:
+            self.client.models.retrieve(self.model)
+        except Exception as exc:
+            raise ValueError(
+                f"OpenAI model '{self.model}' could not be verified via the API: {exc}"
+            ) from exc
+
     def get_model_info(self) -> ModelInfo:
-        """Get information about the current model."""
-        if self.model in OPENAI_MODELS:
-            return OPENAI_MODELS[self.model]
+        """Get information about the current model.
         
-        # Return a generic model info for unknown models
-        return ModelInfo(
+        Queries the OpenAI Models API to confirm the model exists and
+        populate basic metadata. Token limits are not available from the
+        API so reasonable defaults are used.
+        """
+        if self._model_info is not None:
+            return self._model_info
+        
+        display_name = self.model
+        try:
+            info = self.client.models.retrieve(self.model)
+            display_name = getattr(info, "id", self.model)
+        except Exception:
+            pass
+        
+        self._model_info = ModelInfo(
             provider=self.provider,
             model_id=self.model,
-            display_name=self.model,
-            context_window=128000,  # Assume reasonable defaults
+            display_name=display_name,
+            context_window=128000,
             max_output_tokens=4096,
         )
+        return self._model_info
     
     def count_tokens(self, text: str) -> int:
         """Count tokens using tiktoken."""

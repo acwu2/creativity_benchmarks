@@ -8,7 +8,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from llm_benchmarks.clients.base import (
     BaseLLMClient,
     GenerationConfig,
-    InvalidModelError,
     LLMResponse,
     Message,
     MessageRole,
@@ -16,66 +15,6 @@ from llm_benchmarks.clients.base import (
     TokenUsage,
 )
 from llm_benchmarks.config import Settings
-
-
-# Model information for common Anthropic models
-ANTHROPIC_MODELS: dict[str, ModelInfo] = {
-    "claude-3-5-sonnet-20241022": ModelInfo(
-        provider="anthropic",
-        model_id="claude-3-5-sonnet-20241022",
-        display_name="Claude 3.5 Sonnet",
-        context_window=200000,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.003,
-        output_cost_per_1k=0.015,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "claude-3-5-haiku-20241022": ModelInfo(
-        provider="anthropic",
-        model_id="claude-3-5-haiku-20241022",
-        display_name="Claude 3.5 Haiku",
-        context_window=200000,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.001,
-        output_cost_per_1k=0.005,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "claude-3-opus-20240229": ModelInfo(
-        provider="anthropic",
-        model_id="claude-3-opus-20240229",
-        display_name="Claude 3 Opus",
-        context_window=200000,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.015,
-        output_cost_per_1k=0.075,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "claude-3-sonnet-20240229": ModelInfo(
-        provider="anthropic",
-        model_id="claude-3-sonnet-20240229",
-        display_name="Claude 3 Sonnet",
-        context_window=200000,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.003,
-        output_cost_per_1k=0.015,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "claude-3-haiku-20240307": ModelInfo(
-        provider="anthropic",
-        model_id="claude-3-haiku-20240307",
-        display_name="Claude 3 Haiku",
-        context_window=200000,
-        max_output_tokens=4096,
-        input_cost_per_1k=0.00025,
-        output_cost_per_1k=0.00125,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-}
 
 
 class AnthropicClient(BaseLLMClient):
@@ -101,10 +40,6 @@ class AnthropicClient(BaseLLMClient):
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts
         """
-        # Validate model before initialization
-        if model not in ANTHROPIC_MODELS:
-            raise InvalidModelError(model, "anthropic", list(ANTHROPIC_MODELS.keys()))
-        
         settings = Settings()
         super().__init__(
             model=model,
@@ -202,6 +137,10 @@ class AnthropicClient(BaseLLMClient):
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
+    def _generate_with_retry(self, params: dict[str, Any]) -> Any:
+        """Make the API call with retry logic."""
+        return self.client.messages.create(**params)
+
     def generate(
         self,
         prompt: str,
@@ -214,7 +153,7 @@ class AnthropicClient(BaseLLMClient):
         
         start_time = time.perf_counter()
         try:
-            response = self.client.messages.create(**params)
+            response = self._generate_with_retry(params)
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
         except Exception as e:
@@ -322,19 +261,45 @@ class AnthropicClient(BaseLLMClient):
                 error=str(e),
             )
     
+    def validate_model(self) -> None:
+        """Validate that the model name looks correct.
+
+        Attempts a minimal API call to confirm the model is accessible.
+
+        Raises:
+            ValueError: If the API rejects the model.
+        """
+        try:
+            self.client.messages.create(
+                model=self.model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except Exception as exc:
+            err = str(exc).lower()
+            # Ignore token / billing errors – they prove the model exists.
+            if "model" in err or "not found" in err or "invalid" in err:
+                raise ValueError(
+                    f"Anthropic model '{self.model}' could not be verified via the API: {exc}"
+                ) from exc
+
     def get_model_info(self) -> ModelInfo:
-        """Get information about the current model."""
-        if self.model in ANTHROPIC_MODELS:
-            return ANTHROPIC_MODELS[self.model]
+        """Get information about the current model.
         
-        # Return a generic model info for unknown models
-        return ModelInfo(
+        Anthropic does not expose a public model metadata API, so
+        reasonable defaults are returned.
+        """
+        if self._model_info is not None:
+            return self._model_info
+        
+        self._model_info = ModelInfo(
             provider=self.provider,
             model_id=self.model,
             display_name=self.model,
             context_window=200000,
             max_output_tokens=4096,
         )
+        return self._model_info
     
     def count_tokens(self, text: str) -> int:
         """Count tokens (approximate for Anthropic)."""

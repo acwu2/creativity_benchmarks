@@ -665,6 +665,25 @@ Guidelines:
             mean_latency_ms=mean_latency,
         )
     
+    def run(
+        self,
+        client: BaseLLMClient,
+        progress_callback: Optional[callable] = None,
+    ) -> BenchmarkResult:
+        """Run the benchmark, resetting state first."""
+        self.reset()
+        return super().run(client, progress_callback)
+
+    async def run_async(
+        self,
+        client: BaseLLMClient,
+        max_concurrent: int = 5,
+        progress_callback: Optional[callable] = None,
+    ) -> BenchmarkResult:
+        """Run the benchmark asynchronously, resetting state first."""
+        self.reset()
+        return await super().run_async(client, max_concurrent, progress_callback)
+
     def reset(self) -> None:
         """Reset tracked state for a new run."""
         self._chosen_subsets = []

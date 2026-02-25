@@ -7,21 +7,6 @@ from enum import Enum
 from typing import Any, AsyncIterator, Optional
 
 
-class InvalidModelError(ValueError):
-    """Raised when an invalid model is specified for a provider."""
-    
-    def __init__(self, model: str, provider: str, valid_models: list[str]):
-        self.model = model
-        self.provider = provider
-        self.valid_models = valid_models
-        valid_models_str = ", ".join(sorted(valid_models))
-        message = (
-            f"Invalid model '{model}' for provider '{provider}'. "
-            f"Valid models are: {valid_models_str}"
-        )
-        super().__init__(message)
-
-
 class MessageRole(str, Enum):
     """Role in a conversation message."""
     SYSTEM = "system"
@@ -172,6 +157,7 @@ class BaseLLMClient(ABC):
         self.max_retries = max_retries
         self._client: Any = None
         self._async_client: Any = None
+        self._model_info: Optional[ModelInfo] = None
     
     @abstractmethod
     def _initialize_client(self) -> None:
@@ -292,6 +278,17 @@ class BaseLLMClient(ABC):
         """
         raise NotImplementedError("Streaming not implemented for this client")
     
+    def validate_model(self) -> None:
+        """Validate that the configured model is available.
+
+        Raises:
+            ValueError: If the model is not recognized or the provider
+                API reports that it does not exist.
+        """
+        # Default implementation does nothing; subclasses should override
+        # to perform provider-specific checks.
+        pass
+
     @abstractmethod
     def get_model_info(self) -> ModelInfo:
         """Get information about the current model."""

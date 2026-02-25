@@ -10,6 +10,9 @@ BUILTIN_BENCHMARKS = {
     "free-association": "llm_benchmarks.benchmarks.FreeAssociationBenchmark",
     "free": "llm_benchmarks.benchmarks.FreeAssociationBenchmark",
     "fa": "llm_benchmarks.benchmarks.FreeAssociationBenchmark",
+    "telephone-game": "llm_benchmarks.benchmarks.TelephoneGameBenchmark",
+    "telephone": "llm_benchmarks.benchmarks.TelephoneGameBenchmark",
+    "tg": "llm_benchmarks.benchmarks.TelephoneGameBenchmark",
     "this-and-that": "llm_benchmarks.benchmarks.ThisAndThatBenchmark",
     "this-that": "llm_benchmarks.benchmarks.ThisAndThatBenchmark",
     "tat": "llm_benchmarks.benchmarks.ThisAndThatBenchmark",
@@ -119,10 +122,9 @@ Built-in benchmarks: free-association (fa), simple-qa (qa), reasoning
         help="Image format for saved charts",
     )
     viz_parser.add_argument(
-        "--chart", "-c",
-        choices=["all", "scores", "radar", "latency", "heatmap", "summary", "report"],
-        default="all",
-        help="Type of chart to generate",
+        "--report", "-r",
+        action="store_true",
+        help="Generate an HTML report instead of a chart image",
     )
     viz_parser.add_argument(
         "--benchmark", "-b",
@@ -145,8 +147,6 @@ Built-in benchmarks: free-association (fa), simple-qa (qa), reasoning
         return visualize_results(parsed_args)
     elif parsed_args.command == "list":
         return list_benchmarks(parsed_args)
-    elif parsed_args.command == "models":
-        return list_models(parsed_args)
     else:
         parser.print_help()
         return 0
@@ -221,18 +221,24 @@ def run_benchmark(args: argparse.Namespace) -> int:
         console.print(f"[red]Error loading benchmark: {e}[/red]")
         return 1
     
-    # Create clients
+    # Create and validate clients
     clients = []
     for model_spec in args.models:
         try:
             provider, model = parse_model_spec(model_spec)
             client = get_client(provider, model)
+            if not args.quiet:
+                console.print(f"[dim]Validating model '{model}' with {provider}...[/dim]")
+            client.validate_model()
             clients.append(client)
+        except ValueError as e:
+            console.print(f"[red]Error: Invalid model '{model_spec}': {e}[/red]")
         except Exception as e:
             console.print(f"[yellow]Warning: Could not create client for '{model_spec}': {e}[/yellow]")
     
     if not clients:
         console.print("[red]Error: No valid clients configured[/red]")
+        console.print("[dim]Use 'llm-bench models' to see available models.[/dim]")
         return 1
     
     # Print header
@@ -346,49 +352,36 @@ def visualize_results(args: argparse.Namespace) -> int:
     ))
     console.print()
     
-    # Generate requested charts
-    chart_type = args.chart
-    benchmark_filter = args.benchmark
-    
+    # Generate dashboard (or HTML report)
     try:
-        if chart_type == "all":
-            viz.save_all(args.output, format=args.format)
-        elif chart_type == "scores":
-            save_path = args.output / f"score_comparison.{args.format}"
-            args.output.mkdir(parents=True, exist_ok=True)
-            viz.plot_score_comparison(benchmark=benchmark_filter, save_path=save_path)
-        elif chart_type == "radar":
-            save_path = args.output / f"radar_chart.{args.format}"
-            args.output.mkdir(parents=True, exist_ok=True)
-            viz.plot_radar_chart(benchmark=benchmark_filter, save_path=save_path)
-        elif chart_type == "latency":
-            save_path = args.output / f"latency_distribution.{args.format}"
-            args.output.mkdir(parents=True, exist_ok=True)
-            viz.plot_latency_distribution(benchmark=benchmark_filter, save_path=save_path)
-        elif chart_type == "heatmap":
-            save_path = args.output / f"benchmark_heatmap.{args.format}"
-            args.output.mkdir(parents=True, exist_ok=True)
-            viz.plot_benchmark_heatmap(save_path=save_path)
-        elif chart_type == "summary":
-            save_path = args.output / f"metrics_summary.{args.format}"
-            args.output.mkdir(parents=True, exist_ok=True)
-            viz.plot_metrics_summary(save_path=save_path)
-        elif chart_type == "report":
+        args.output.mkdir(parents=True, exist_ok=True)
+
+        if args.report:
             report_path = args.output / "benchmark_report.html"
-            args.output.mkdir(parents=True, exist_ok=True)
             viz.generate_html_report(report_path)
             console.print(f"[green]HTML report saved to: {report_path}[/green]")
-            return 0
-        
-        console.print()
-        console.print(f"[bold green]✓ Charts saved to: {args.output}/[/bold green]")
-        
-    except ImportError as e:
-        console.print(f"[red]Error: Missing visualization dependencies[/red]")
-        console.print(f"[dim]Install with: pip install matplotlib seaborn[/dim]")
+        elif args.benchmark:
+            save_path = args.output / f"{args.benchmark}.{args.format}"
+            viz.plot_dashboard(
+                benchmark=args.benchmark,
+                save_path=save_path,
+            )
+            console.print()
+            console.print(f"[bold green]✓ Chart saved to: {save_path}[/bold green]")
+        else:
+            viz.plot_all_dashboards(
+                save_dir=args.output,
+                format=args.format,
+            )
+            console.print()
+            console.print(f"[bold green]✓ Charts saved to: {args.output}[/bold green]")
+
+    except ImportError:
+        console.print("[red]Error: Missing visualization dependencies[/red]")
+        console.print("[dim]Install with: pip install matplotlib seaborn[/dim]")
         return 1
     except Exception as e:
-        console.print(f"[red]Error generating charts: {e}[/red]")
+        console.print(f"[red]Error generating chart: {e}[/red]")
         return 1
     
     return 0
@@ -411,6 +404,10 @@ def list_benchmarks(args: argparse.Namespace) -> int:
         "free-association": {
             "aliases": ["free", "fa"],
             "description": "Measure creative vocabulary through free word association",
+        },
+        "telephone-game": {
+            "aliases": ["telephone", "tg"],
+            "description": "Measure creative stability and mode collapse through iterative rewriting",
         },
         "this-and-that": {
             "aliases": ["this-that", "tat", "style-flexibility"],
@@ -444,50 +441,6 @@ def list_benchmarks(args: argparse.Namespace) -> int:
     console.print("[dim]Example:[/dim] llm-bench run free-association -m gpt-4o")
     
     return 0
-
-
-def list_models(args: argparse.Namespace) -> int:
-    """List available models."""
-    import os
-    from rich.console import Console
-    from rich.table import Table
-    
-    console = Console()
-    
-    providers = {
-        "openai": {
-            "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo", "o1", "o1-mini"],
-            "env_key": "OPENAI_API_KEY",
-        },
-        "anthropic": {
-            "models": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
-            "env_key": "ANTHROPIC_API_KEY",
-        },
-        "google": {
-            "models": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-            "env_key": "GOOGLE_API_KEY",
-        },
-    }
-    
-    for provider, info in providers.items():
-        has_key = bool(os.environ.get(info["env_key"]))
-        status = "✅" if has_key else "❌"
-        
-        table = Table(title=f"{provider.title()} {status}")
-        table.add_column("Model", style="cyan")
-        table.add_column("Usage")
-        
-        for model in info["models"]:
-            table.add_row(model, f"-m {model}")
-        
-        console.print(table)
-        
-        if not has_key:
-            console.print(f"[yellow]  ⚠ Set {info['env_key']} to use these models[/yellow]")
-        console.print()
-    
-    return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

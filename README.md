@@ -1,25 +1,39 @@
-# LLM Benchmarks
+# LLM Creativity Benchmarks
 
-A flexible framework for benchmarking Large Language Models across various tasks and providers.
+A framework for evaluating the **creative capabilities** of Large Language Models. Rather than testing factual accuracy or reasoning, these benchmarks measure how well models handle open-ended creative tasks like free association, style interpolation, constrained writing, and stylistic differentiation.
 
-## Features
+## Benchmarks
 
-- **Multi-provider support**: OpenAI, Anthropic, Google, and more
-- **Extensible benchmark system**: Easy to create custom benchmarks
-- **Async execution**: Run benchmarks efficiently with async support
-- **Rich metrics**: Token usage, latency, cost tracking
-- **Result persistence**: Save and analyze benchmark results
+| Benchmark | Category | What It Measures |
+|---|---|---|
+| **Free Association** (`free-association`, `fa`) | Iteration | Vocabulary exploration — how many unique words a model produces and how quickly it repeats |
+| **Telephone Game** (`telephone-game`, `tg`) | Iteration | Meaning drift across iterative rewriting |
+| **This & That** (`this-and-that`, `tat`) | Style Flexibility | Style interpolation — generating text that blends two distinct writing styles |
+| **Not Like That** (`not-like-that`, `nlt`) | Difference & Negation | Constrained style differentiation — writing *like* one example while *avoiding* another |
+| **Quilting** (`quilting`, `quilt`) | Creative Constraints | Creative synthesis from constrained ingredients — weaving pre-set fragments into coherent prose |
+
+## Supported Providers
+
+- **OpenAI** — GPT-4o, GPT-3.5 Turbo, o1, etc.
+- **Anthropic** — Claude 3.5 Sonnet, Claude 3 Opus, etc.
+- **Google** — Gemini models
 
 ## Installation
 
+Requires **Python 3.10+**.
+
 ```bash
-# Install in development mode
+# Clone the repo
+git clone <repo-url>
+cd creativity_benchmarks
+
+# Install in development mode (includes test dependencies)
 pip install -e ".[dev]"
 ```
 
 ## Configuration
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root with API keys for the providers you want to use:
 
 ```env
 OPENAI_API_KEY=your-openai-key
@@ -27,53 +41,106 @@ ANTHROPIC_API_KEY=your-anthropic-key
 GOOGLE_API_KEY=your-google-key
 ```
 
-## Quick Start
+Only the key(s) for the provider(s) you plan to test are required. Additional optional settings:
 
-```python
-from llm_benchmarks import OpenAIClient, AnthropicClient
-from llm_benchmarks.benchmarks import YourBenchmark
+| Variable | Default | Description |
+|---|---|---|
+| `OPENAI_BASE_URL` | — | Custom OpenAI-compatible API base URL |
+| `ANTHROPIC_BASE_URL` | — | Custom Anthropic API base URL |
+| `BENCHMARK_OUTPUT_DIR` | `./results` | Where result JSON files are saved |
+| `BENCHMARK_MAX_CONCURRENT` | `5` | Max concurrent API calls |
+| `BENCHMARK_DEFAULT_TIMEOUT` | `120` | API call timeout in seconds |
+| `BENCHMARK_RETRY_ATTEMPTS` | `3` | Retry count for failed calls |
 
-# Initialize clients
-openai_client = OpenAIClient(model="gpt-4")
-anthropic_client = AnthropicClient(model="claude-3-opus-20240229")
+## Usage
 
-# Run benchmark
-benchmark = YourBenchmark()
-results = benchmark.run([openai_client, anthropic_client])
+All commands use the `llm-bench` CLI:
 
-# Analyze results
-benchmark.save_results(results, "results/my_benchmark.json")
+### Run a benchmark
+
+```bash
+# Run Free Association against GPT-4o (default model)
+llm-bench run free-association
+
+# Specify one or more models
+llm-bench run quilting -m gpt-4o anthropic:claude-3-5-sonnet-20241022
+
+# Run asynchronously with higher concurrency
+llm-bench run this-and-that -m gpt-4o --async -c 10
 ```
 
-## Creating Custom Benchmarks
+The model prefix is auto-detected from the name (`gpt-*` → OpenAI, `claude-*` → Anthropic, `gemini-*` → Google), or you can be explicit with `provider:model` syntax.
 
-```python
-from llm_benchmarks.benchmarks import BaseBenchmark, BenchmarkResult
+### List available benchmarks
 
-class MyBenchmark(BaseBenchmark):
-    name = "my_benchmark"
-    description = "My custom benchmark"
-    
-    def get_prompts(self) -> list[dict]:
-        return [
-            {"id": "1", "prompt": "Your prompt here", "metadata": {}}
-        ]
-    
-    def evaluate_response(self, prompt: dict, response: str) -> dict:
-        # Your evaluation logic
-        return {"score": 1.0, "details": {}}
+```bash
+llm-bench list
 ```
+
+### Compare results
+
+```bash
+llm-bench compare results/*.json
+```
+
+### Visualize results
+
+```bash
+# Generate all chart types into ./charts
+llm-bench visualize results/
+
+# Generate a single HTML report
+llm-bench visualize results/ -c report
+
+# Filter to a specific benchmark and export as SVG
+llm-bench visualize results/ -b free_association -f svg
+```
+
+Chart types: `all`, `scores`, `radar`, `latency`, `heatmap`, `summary`, `report`.
+
+## Results
+
+Benchmark results are saved as JSON files in `results/` (by default), named with the pattern:
+
+```
+{benchmark}_{provider}_{model}_{timestamp}.json
+```
+
+Each result file contains per-prompt scores, aggregated metrics (mean, std, min, max), token usage, latency, and cost estimates.
 
 ## Project Structure
 
 ```
 src/llm_benchmarks/
-├── __init__.py
-├── clients/           # LLM provider clients
-├── benchmarks/        # Benchmark implementations
-├── config/            # Configuration management
-├── utils/             # Utility functions
-└── cli.py             # Command-line interface
+├── cli.py                              # CLI entry point (llm-bench)
+├── clients/                            # LLM provider clients
+│   ├── openai_client.py
+│   ├── anthropic_client.py
+│   └── google_client.py
+├── benchmarks/
+│   ├── base.py                         # BaseBenchmark, BenchmarkResult, etc.
+│   ├── runner.py                       # BenchmarkRunner orchestration
+│   ├── iteration/
+│   │   ├── free_association.py         # Free Association benchmark
+│   │   └── telephone_game.py          # Telephone Game benchmark
+│   ├── style_flexibility/
+│   │   └── this_and_that.py            # This & That benchmark
+│   ├── difference_and_negation/
+│   │   └── not_like_that.py            # Not Like That benchmark
+│   └── creative_constraints/
+│       └── quilting.py                 # Quilting benchmark
+├── config/
+│   └── settings.py                     # Pydantic-based settings (.env loading)
+└── utils/
+    ├── metrics.py                      # Scoring helpers
+    ├── text.py                         # Text processing utilities
+    └── visualizer.py                   # Chart generation & HTML reports
+```
+
+## Running Tests
+
+```bash
+pytest
 ```
 
 ## License

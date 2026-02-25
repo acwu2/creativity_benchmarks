@@ -1,4 +1,4 @@
-"""Google Generative AI (Gemini) client implementation."""
+"""Google Generative AI (Gemini) client implementation using the google.genai SDK."""
 
 import time
 from typing import Any, Optional
@@ -8,7 +8,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from llm_benchmarks.clients.base import (
     BaseLLMClient,
     GenerationConfig,
-    InvalidModelError,
     LLMResponse,
     Message,
     MessageRole,
@@ -16,55 +15,6 @@ from llm_benchmarks.clients.base import (
     TokenUsage,
 )
 from llm_benchmarks.config import Settings
-
-
-# Model information for common Google models
-GOOGLE_MODELS: dict[str, ModelInfo] = {
-    "gemini-2.0-flash": ModelInfo(
-        provider="google",
-        model_id="gemini-2.0-flash",
-        display_name="Gemini 2.0 Flash",
-        context_window=1000000,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.0001,
-        output_cost_per_1k=0.0004,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gemini-1.5-pro": ModelInfo(
-        provider="google",
-        model_id="gemini-1.5-pro",
-        display_name="Gemini 1.5 Pro",
-        context_window=2000000,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.00125,
-        output_cost_per_1k=0.005,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gemini-1.5-flash": ModelInfo(
-        provider="google",
-        model_id="gemini-1.5-flash",
-        display_name="Gemini 1.5 Flash",
-        context_window=1000000,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.000075,
-        output_cost_per_1k=0.0003,
-        supports_vision=True,
-        supports_tools=True,
-    ),
-    "gemini-1.0-pro": ModelInfo(
-        provider="google",
-        model_id="gemini-1.0-pro",
-        display_name="Gemini 1.0 Pro",
-        context_window=32760,
-        max_output_tokens=8192,
-        input_cost_per_1k=0.0005,
-        output_cost_per_1k=0.0015,
-        supports_vision=False,
-        supports_tools=True,
-    ),
-}
 
 
 class GoogleClient(BaseLLMClient):
@@ -88,10 +38,6 @@ class GoogleClient(BaseLLMClient):
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts
         """
-        # Validate model before initialization
-        if model not in GOOGLE_MODELS:
-            raise InvalidModelError(model, "google", list(GOOGLE_MODELS.keys()))
-        
         settings = Settings()
         super().__init__(
             model=model,
@@ -99,41 +45,43 @@ class GoogleClient(BaseLLMClient):
             timeout=timeout,
             max_retries=max_retries,
         )
-        self._model_instance: Any = None
     
     def _initialize_client(self) -> None:
-        """Initialize the Google Generative AI client."""
-        import google.generativeai as genai
+        """Initialize the Google genai client."""
+        from google import genai
         
-        genai.configure(api_key=self.api_key)
-        self._client = genai
-        self._model_instance = genai.GenerativeModel(self.model)
+        self._client = genai.Client(api_key=self.api_key)
     
     def _initialize_async_client(self) -> None:
-        """Initialize the async client (same as sync for Google)."""
-        self._initialize_client()
+        """Initialize the async client (same client exposes .aio)."""
+        if self._client is None:
+            self._initialize_client()
         self._async_client = self._client
     
     def _build_generation_config(
         self,
         config: Optional[GenerationConfig] = None,
-    ) -> dict[str, Any]:
-        """Build the generation config for Google API."""
-        import google.generativeai as genai
+        system_prompt: Optional[str] = None,
+    ) -> "google.genai.types.GenerateContentConfig":
+        """Build the generation config for the Google genai API."""
+        from google.genai import types
         
-        gen_config: dict[str, Any] = {}
+        kwargs: dict[str, Any] = {}
+        
+        if system_prompt:
+            kwargs["system_instruction"] = system_prompt
         
         if config:
             if config.max_tokens is not None:
-                gen_config["max_output_tokens"] = config.max_tokens
+                kwargs["max_output_tokens"] = config.max_tokens
             if config.temperature != 1.0:
-                gen_config["temperature"] = config.temperature
+                kwargs["temperature"] = config.temperature
             if config.top_p != 1.0:
-                gen_config["top_p"] = config.top_p
+                kwargs["top_p"] = config.top_p
             if config.stop_sequences:
-                gen_config["stop_sequences"] = config.stop_sequences
+                kwargs["stop_sequences"] = config.stop_sequences
         
-        return gen_config
+        return types.GenerateContentConfig(**kwargs)
     
     def _parse_response(
         self,
@@ -147,7 +95,7 @@ class GoogleClient(BaseLLMClient):
         
         # Extract usage metadata if available
         usage = TokenUsage()
-        if hasattr(response, "usage_metadata"):
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
             metadata = response.usage_metadata
             usage = TokenUsage(
                 prompt_tokens=getattr(metadata, "prompt_token_count", 0),
@@ -174,6 +122,18 @@ class GoogleClient(BaseLLMClient):
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
+    def _generate_with_retry(
+        self,
+        prompt: str,
+        gen_config: "Any",
+    ) -> "Any":
+        """Make the API call with retry logic."""
+        return self._client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=gen_config,
+        )
+
     def generate(
         self,
         prompt: str,
@@ -181,27 +141,14 @@ class GoogleClient(BaseLLMClient):
         config: Optional[GenerationConfig] = None,
     ) -> LLMResponse:
         """Generate a response for the given prompt."""
-        # Ensure client is initialized
-        if self._model_instance is None:
+        if self._client is None:
             self._initialize_client()
         
-        gen_config = self._build_generation_config(config)
-        
-        # Build the full prompt with system instruction
-        model = self._model_instance
-        if system_prompt:
-            import google.generativeai as genai
-            model = genai.GenerativeModel(
-                self.model,
-                system_instruction=system_prompt,
-            )
+        gen_config = self._build_generation_config(config, system_prompt)
         
         start_time = time.perf_counter()
         try:
-            response = model.generate_content(
-                prompt,
-                generation_config=gen_config if gen_config else None,
-            )
+            response = self._generate_with_retry(prompt, gen_config)
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
         except Exception as e:
@@ -222,26 +169,17 @@ class GoogleClient(BaseLLMClient):
         config: Optional[GenerationConfig] = None,
     ) -> LLMResponse:
         """Asynchronously generate a response for the given prompt."""
-        # Ensure client is initialized
-        if self._model_instance is None:
+        if self._client is None:
             self._initialize_client()
         
-        gen_config = self._build_generation_config(config)
-        
-        # Build the full prompt with system instruction
-        model = self._model_instance
-        if system_prompt:
-            import google.generativeai as genai
-            model = genai.GenerativeModel(
-                self.model,
-                system_instruction=system_prompt,
-            )
+        gen_config = self._build_generation_config(config, system_prompt)
         
         start_time = time.perf_counter()
         try:
-            response = await model.generate_content_async(
-                prompt,
-                generation_config=gen_config if gen_config else None,
+            response = await self._client.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=gen_config,
             )
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
@@ -262,42 +200,40 @@ class GoogleClient(BaseLLMClient):
         config: Optional[GenerationConfig] = None,
     ) -> LLMResponse:
         """Generate a response for a chat conversation."""
-        # Ensure client is initialized
-        if self._model_instance is None:
+        if self._client is None:
             self._initialize_client()
         
-        gen_config = self._build_generation_config(config)
+        from google.genai import types
         
-        # Extract system prompt and convert messages
+        # Extract system prompt and convert messages to history
         system_prompt = None
-        history = []
+        history: list[types.Content] = []
         
         for msg in messages[:-1]:  # All but the last message
             if msg.role == MessageRole.SYSTEM:
                 system_prompt = msg.content
             else:
                 role = "user" if msg.role == MessageRole.USER else "model"
-                history.append({"role": role, "parts": [msg.content]})
+                history.append(
+                    types.Content(
+                        role=role,
+                        parts=[types.Part.from_text(text=msg.content)],
+                    )
+                )
         
         # Get the last user message
         last_message = messages[-1].content if messages else ""
         
-        # Create model with system instruction if present
-        model = self._model_instance
-        if system_prompt:
-            import google.generativeai as genai
-            model = genai.GenerativeModel(
-                self.model,
-                system_instruction=system_prompt,
-            )
+        gen_config = self._build_generation_config(config, system_prompt)
         
         start_time = time.perf_counter()
         try:
-            chat = model.start_chat(history=history)
-            response = chat.send_message(
-                last_message,
-                generation_config=gen_config if gen_config else None,
+            chat = self._client.chats.create(
+                model=self.model,
+                config=gen_config,
+                history=history,
             )
+            response = chat.send_message(last_message)
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
         except Exception as e:
@@ -317,40 +253,39 @@ class GoogleClient(BaseLLMClient):
         config: Optional[GenerationConfig] = None,
     ) -> LLMResponse:
         """Asynchronously generate a response for a chat conversation."""
-        # Ensure client is initialized
-        if self._model_instance is None:
+        if self._client is None:
             self._initialize_client()
         
-        gen_config = self._build_generation_config(config)
+        from google.genai import types
         
-        # Extract system prompt and convert messages
+        # Extract system prompt and convert messages to history
         system_prompt = None
-        history = []
+        history: list[types.Content] = []
         
         for msg in messages[:-1]:
             if msg.role == MessageRole.SYSTEM:
                 system_prompt = msg.content
             else:
                 role = "user" if msg.role == MessageRole.USER else "model"
-                history.append({"role": role, "parts": [msg.content]})
+                history.append(
+                    types.Content(
+                        role=role,
+                        parts=[types.Part.from_text(text=msg.content)],
+                    )
+                )
         
         last_message = messages[-1].content if messages else ""
         
-        model = self._model_instance
-        if system_prompt:
-            import google.generativeai as genai
-            model = genai.GenerativeModel(
-                self.model,
-                system_instruction=system_prompt,
-            )
+        gen_config = self._build_generation_config(config, system_prompt)
         
         start_time = time.perf_counter()
         try:
-            chat = model.start_chat(history=history)
-            response = await chat.send_message_async(
-                last_message,
-                generation_config=gen_config if gen_config else None,
+            chat = self._client.aio.chats.create(
+                model=self.model,
+                config=gen_config,
+                history=history,
             )
+            response = await chat.send_message(last_message)
             latency_ms = (time.perf_counter() - start_time) * 1000
             return self._parse_response(response, latency_ms)
         except Exception as e:
@@ -364,15 +299,51 @@ class GoogleClient(BaseLLMClient):
                 error=str(e),
             )
     
+    def validate_model(self) -> None:
+        """Validate that the model exists.
+
+        Queries the Google genai Models API for confirmation.
+
+        Raises:
+            ValueError: If the API reports that the model does not exist.
+        """
+        try:
+            if self._client is None:
+                self._initialize_client()
+            self._client.models.get(model=self.model)
+        except Exception as exc:
+            raise ValueError(
+                f"Google model '{self.model}' could not be verified via the API: {exc}"
+            ) from exc
+
     def get_model_info(self) -> ModelInfo:
-        """Get information about the current model."""
-        if self.model in GOOGLE_MODELS:
-            return GOOGLE_MODELS[self.model]
+        """Get information about the current model.
         
-        return ModelInfo(
+        Queries the Google genai API for actual model metadata
+        including token limits. Falls back to defaults on failure.
+        """
+        if self._model_info is not None:
+            return self._model_info
+        
+        display_name = self.model
+        context_window = 1000000
+        max_output_tokens = 8192
+        
+        try:
+            if self._client is None:
+                self._initialize_client()
+            model_meta = self._client.models.get(model=self.model)
+            display_name = getattr(model_meta, "display_name", self.model)
+            context_window = getattr(model_meta, "input_token_limit", context_window)
+            max_output_tokens = getattr(model_meta, "output_token_limit", max_output_tokens)
+        except Exception:
+            pass
+        
+        self._model_info = ModelInfo(
             provider=self.provider,
             model_id=self.model,
-            display_name=self.model,
-            context_window=32000,
-            max_output_tokens=8192,
+            display_name=display_name,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
         )
+        return self._model_info
