@@ -2,6 +2,8 @@
 
 A framework for evaluating the **creative capabilities** of Large Language Models. Rather than testing factual accuracy or reasoning, these benchmarks measure how well models handle open-ended creative tasks like free association, style interpolation, constrained writing, and stylistic differentiation.
 
+Inspired by Gwern's post: [Towards Benchmarking LLM Diversity & Creativity](https://gwern.net/creative-benchmark)
+
 ## Benchmarks
 
 | Benchmark | Category | What It Measures |
